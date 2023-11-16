@@ -1,0 +1,233 @@
+from PySide2 import QtCore
+from PySide2 import QtWidgets
+import os
+import hou
+import json
+import toolutils
+
+from PySide2.QtWidgets import QWidget, QVBoxLayout, QComboBox, QFormLayout, QHBoxLayout, QPushButton, QLabel, QListWidget
+
+class Project_setter:
+    def __init__(self) -> None:
+        self.cur_proj_path = None
+        self.set_proj_path = None
+
+class FirstWindow(QtWidgets.QWidget):
+    confirmed_settings = QtCore.Signal(str)
+
+class DummyShowSeqShot:
+    SHOW_ROOT = "C:/LocalJobs/TestStudio"
+    SEQ_ROOT = "Seq"
+    SHOT_ROOT = "Shots"
+    SNIPPET_SUBFOLDER = "Assets/Snippets"
+    def __init__(self) -> None:
+        self._shows = ["None"] + os.listdir(DummyShowSeqShot.SHOW_ROOT)
+        self._cur_show = None
+
+        self._seqs = None
+        self._cur_seq = None
+
+        self._shots = None
+        self._cur_shot = None
+
+        self._cur_dir = DummyShowSeqShot.SHOW_ROOT
+
+    def current_shot(self):
+        return self._cur_shot
+
+    def current_seq(self):
+        return self._cur_seq
+
+    def current_show(self):
+        return self._cur_show
+
+    def clear_all(self):
+        self.__init__()
+
+    def select_show(self, show):
+        self._cur_seq = None
+        self._shots = None
+        self._cur_shot = None
+        if show != "None":
+            self._cur_dir = os.path.join(DummyShowSeqShot.SHOW_ROOT, show)
+            self._cur_show = show
+            self._seqs = ["None"] + os.listdir(os.path.join(self._cur_dir, DummyShowSeqShot.SEQ_ROOT))
+        else:
+            self._cur_show = None
+            self._seqs = None
+            self._shows = ["None"] + os.listdir(DummyShowSeqShot.SHOW_ROOT)
+            self._cur_dir = DummyShowSeqShot.SHOW_ROOT
+
+    def select_seq(self, seq):
+        self._cur_shot = None
+        if seq != "None":
+            self._cur_dir = os.path.join(DummyShowSeqShot.SHOW_ROOT, self._cur_show, DummyShowSeqShot.SEQ_ROOT, seq)
+            self._cur_seq = seq
+            self._shots = ["None"] + os.listdir(os.path.join(self._cur_dir, DummyShowSeqShot.SHOT_ROOT))
+        else:
+            self._cur_dir = os.path.join(DummyShowSeqShot.SHOW_ROOT, self._cur_show)
+            self._cur_seq = None
+            self._shots = None
+        
+
+    def select_shot(self, shot):
+        if shot != "None":
+            self._cur_dir = os.path.join(DummyShowSeqShot.SHOW_ROOT, self._cur_show, DummyShowSeqShot.SEQ_ROOT, self._cur_seq, DummyShowSeqShot.SHOT_ROOT, shot)
+            self._cur_shot = shot
+        else:
+            self._cur_dir = os.path.join(DummyShowSeqShot.SHOW_ROOT, self._cur_show, DummyShowSeqShot.SEQ_ROOT, self._cur_seq)
+
+    def get_snippet_folder(self):
+        if self._cur_dir is not None:
+            return os.path.join(self._cur_dir, DummyShowSeqShot.SNIPPET_SUBFOLDER)
+        else:
+            return None
+
+class SnippetBrowser(QWidget):
+    def __init__(self, parent=None):
+        QtWidgets.QWidget.__init__(self, parent)
+        self.setGeometry(500, 300, 500, 500)
+        self.setWindowTitle('Snippet Browser')
+
+        self.outer_vbox = QVBoxLayout()
+        self.shot_select_form = QFormLayout()
+        self.snippet_select_list = QListWidget()
+        self.control_buttons_layout = QHBoxLayout()
+
+        self.outer_vbox.addLayout(self.shot_select_form)
+        self.outer_vbox.addWidget(self.snippet_select_list)
+        self.outer_vbox.addLayout(self.control_buttons_layout)
+
+        self.show_select_combobox = QComboBox()
+        self.seq_select_combobox = QComboBox()
+        self.shot_select_combobox = QComboBox()
+
+        self.show_seq_shot_selector = DummyShowSeqShot()
+        self.show_select_combobox.addItems(self.show_seq_shot_selector._shows)
+
+        self.show_select_combobox.activated.connect(self.show_selected)
+        self.seq_select_combobox.activated.connect(self.seq_selected)
+        self.shot_select_combobox.activated.connect(self.shot_selected)
+        
+        self.shot_select_form.addRow("Show", self.show_select_combobox)
+        self.shot_select_form.addRow("Sequence", self.seq_select_combobox)
+        self.shot_select_form.addRow("Shot", self.shot_select_combobox)
+
+        self.save_btn = QPushButton("Save")
+        self.load_btn = QPushButton("Load")
+        self.delete_btn = QPushButton("Delete")
+        self.refresh_btn = QPushButton("Refresh")
+
+        self.control_buttons_layout.addWidget(self.save_btn)
+        self.control_buttons_layout.addWidget(self.load_btn)
+        self.control_buttons_layout.addWidget(self.delete_btn)
+        self.control_buttons_layout.addWidget(self.refresh_btn)
+        self.snippet_paths_list = None
+
+        self.save_btn.clicked.connect(self.publish_snippet)
+        self.load_btn.clicked.connect(self.load_snippet)
+        self.delete_btn.clicked.connect(self.delete_snippet)
+        self.refresh_btn.clicked.connect(self.update_snippets)
+        self.snippet_select_list.currentTextChanged.connect(self.check_enabled)
+
+        self.setLayout(self.outer_vbox)
+        self.update_snippets()
+        self.check_enabled()
+
+    def check_enabled(self):
+        snippets_count = self.snippet_select_list.count()
+        has_snippets = snippets_count > 0
+        has_show_selected = self.show_seq_shot_selector.current_show() is not None
+        has_seq_selected = self.show_seq_shot_selector.current_seq() is not None
+        has_snippet_selected = self.snippet_select_list.currentItem() is not None
+
+        self.load_btn.setEnabled(has_snippets and has_snippet_selected)
+        self.delete_btn.setEnabled(has_snippets and has_snippet_selected)
+        self.seq_select_combobox.setEnabled(has_show_selected)
+        self.shot_select_combobox.setEnabled(has_show_selected and has_seq_selected)
+
+    def show_selected(self, index):
+        show = self.show_select_combobox.currentText()
+        self.show_seq_shot_selector.select_show(show)
+        self.seq_select_combobox.clear()
+        self.shot_select_combobox.clear()
+        if self.show_seq_shot_selector._seqs is not None:
+            self.seq_select_combobox.addItems(self.show_seq_shot_selector._seqs)
+        self.update_snippets()
+        self.check_enabled()
+
+    def seq_selected(self, index):
+        seq = self.seq_select_combobox.currentText()
+        self.show_seq_shot_selector.select_seq(seq)
+        self.shot_select_combobox.clear()
+        if self.show_seq_shot_selector._shots is not None:
+            self.shot_select_combobox.addItems(self.show_seq_shot_selector._shots)
+        self.update_snippets()
+        self.check_enabled()
+
+    def shot_selected(self, index):
+        shot = self.shot_select_combobox.currentText()
+        self.show_seq_shot_selector.select_shot(shot)
+        self.update_snippets()
+        self.check_enabled()
+
+    #def update_snippets(self):
+        #print(self.show_seq_shot_selector.get_snippet_folder())
+
+    def publish_snippet(self): 
+        snippet_folder = self.show_seq_shot_selector.get_snippet_folder()
+        if not os.path.exists(snippet_folder):
+            os.makedirs(snippet_folder)
+
+        items = hou.selectedItems()
+        if not items:
+            hou.ui.displayMessage('No Items Selected')
+            return False
+
+        parent = items[0].parent()
+
+        snippet_name = hou.ui.readInput('Snippet Name:')[1]
+        snippet_path = os.sep.join((snippet_folder, snippet_name)).replace('\\', '/')
+
+        hip_snippet_file = '{}.hsnippet'.format(snippet_path)
+        parent.saveItemsToFile(items, hip_snippet_file)
+
+        with open('{}.snhdr'.format(snippet_path), "w") as fd:
+            json.dump({
+                #'author': os.environ['USERNAME'],
+                'name': snippet_name,
+                'context': items[0].type().category().name().upper()
+            }, fd)
+
+        self.update_snippets()
+        self.check_enabled()
+        return True
+
+    def update_snippets(self):
+        self.snippet_select_list.clear()
+        self.snippet_paths_list = []
+        snippet_folder = self.show_seq_shot_selector.get_snippet_folder()
+        if os.path.exists(snippet_folder):
+            all_snhdr_files = [x for x in os.listdir(snippet_folder) if x.endswith('.snhdr')]
+            for item in all_snhdr_files:
+                with open(os.sep.join((snippet_folder, item)), 'r') as fd:
+                    info = json.load(fd)
+                    self.snippet_paths_list.append(os.sep.join((snippet_folder, info['name'])))
+                    self.snippet_select_list.addItem(f'{info["name"]} - {info["context"]}')
+
+    def load_snippet(self):
+        snippet_parent = toolutils.networkEditor().pwd()
+        selected_item = self.snippet_select_list.currentRow()
+        snippet_parent.loadItemsFromFile('{}.hsnippet'.format(self.snippet_paths_list[selected_item]))
+
+    def delete_snippet(self):
+        selected_item = self.snippet_select_list.currentRow()
+        snippet_path = self.snippet_paths_list[selected_item]
+        os.remove(f'{snippet_path}.hsnippet')
+        os.remove(f'{snippet_path}.snhdr')
+        self.update_snippets()
+        self.check_enabled()
+    
+
+dialog = SnippetBrowser()
+dialog.show()
