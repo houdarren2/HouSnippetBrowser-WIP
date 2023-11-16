@@ -7,14 +7,6 @@ import toolutils
 
 from PySide2.QtWidgets import QWidget, QVBoxLayout, QComboBox, QFormLayout, QHBoxLayout, QPushButton, QLabel, QListWidget
 
-class Project_setter:
-    def __init__(self) -> None:
-        self.cur_proj_path = None
-        self.set_proj_path = None
-
-class FirstWindow(QtWidgets.QWidget):
-    confirmed_settings = QtCore.Signal(str)
-
 class DummyShowSeqShot:
     SHOW_ROOT = "C:/LocalJobs/TestStudio"
     SEQ_ROOT = "Seq"
