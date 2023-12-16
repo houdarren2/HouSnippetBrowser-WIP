@@ -4,16 +4,141 @@ import os
 import hou
 import json
 import toolutils
+import shutil
+import sys
 
-from PySide2.QtWidgets import QWidget, QVBoxLayout, QComboBox, QFormLayout, QHBoxLayout, QPushButton, QLabel, QListWidget
+from PySide2.QtWidgets import QDialog, QProgressBar, QLineEdit, QMessageBox, QFileDialog, QWidget, QVBoxLayout, QComboBox, QFormLayout, QHBoxLayout, QPushButton, QLabel, QListWidget, QStatusBar
+from PySide2.QtCore import Signal, QEvent, QThread, Qt
+from PySide2 import QtCore
+
+#Create Directory QDialog Widget
+
+class GiveNameDialog(QDialog):
+    text_entered_signal = Signal(str)
+
+    def __init__(self, parent = None):
+        super().__init__(parent)
+        self.setWindowTitle("Name Folder Dialog")
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint & ~Qt.WindowCloseButtonHint)   #####################
+
+        self.v_layout = QVBoxLayout()
+        self.h_layout = QHBoxLayout()
+        self.h_line_layout = QHBoxLayout()
+
+        self.name_label = QLabel("Name: ")
+        self.text_edit_dialog = QLineEdit(self)
+        self.ok_button = QPushButton("Ok", self)
+        self.cancel_button = QPushButton("Cancel", self)
+
+        self.ok_button.clicked.connect(self.on_ok_button_clicked)
+        self.cancel_button.clicked.connect(self.on_cancel_button_clicked)
+
+        self.h_layout.addWidget(self.ok_button)
+        self.h_layout.addWidget(self.cancel_button)
+
+        self.h_line_layout.addWidget(self.name_label)
+        self.h_line_layout.addWidget(self.text_edit_dialog)
+
+        self.v_layout.addLayout(self.h_line_layout)
+        self.v_layout.addLayout(self.h_layout)
+
+        self.setLayout(self.v_layout)
+
+    def on_ok_button_clicked(self):
+        entered_text = str(self.text_edit_dialog.text())
+        self.text_entered_signal.emit(entered_text)
+        self.accept()
+        self.deleteLater()
+
+    def on_cancel_button_clicked(self):
+        self.reject()
+        #self.deleteLater()
+        
+
+class HoverButton(QPushButton):
+    show_status_tip = Signal(str)
+    clear_status_tip = Signal()
+
+    def __init__(self, text, status_tip, parent = None):
+        super().__init__(text, parent)
+        self.setStatusTip(status_tip)
+
+    def enterEvent(self, event):
+        self.show_status_tip.emit(self.statusTip())
+
+    def leaveEvent(self, event):
+        self.clear_status_tip.emit()
+
+###########################################################################################################
+#   File Dialog Widget
+
+class FileDialogWindow(QWidget):
+    folder_selected = Signal(str)
+
+    def __init__(self, parent = None):
+        super().__init__(parent)
+        self.folder_path = None
+        self.destroyed.connect(self.show_folder_dialog) #the destroyed signal is only called when its closed, this is for cleanup
+
+    def show_folder_dialog(self):
+        #initialize file dialog options
+        options = QFileDialog.Option()
+        #stay true until given a reason for it to break out of the loop
+        while True:
+            #folder_dialog = get actual file browser
+            folder_dialog = QFileDialog()
+            #this will fire the window
+            self.folder_path = folder_dialog.getExistingDirectory(self, "Set Project Folder", "", options=options)  #options=options is to fire the File Dialog options
+
+            if self.folder_path:
+                self.folder_selected.emit(self.folder_path)
+                break
+
+            message_reply = QMessageBox.question(self, "Confirmation", "There is no Project Set. Do you want to to Continue Browsing?",
+                                                 QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Yes)
+            if message_reply == QMessageBox.Cancel:
+                QMessageBox.warning(self, "Warning", "Project Path has not been Changed")
+                break
+
+        #print("File path is {}".format(self.folder_path))
+        return self.folder_path
+
+class SnippetLoaderThread(QThread):
+    update_progress = Signal(int)
+
+    def __init__(self, snippet_to_eval):    #No parent=None because this cant be independent
+        super().__init__()
+        self.snippet_to_eval = snippet_to_eval
+    
+    def run(self):  #special method that is built into QThread to fire the method to run the code below
+        progress_percentage = 0
+        with open("{}.hsnippet".format(self.snippet_to_eval), "r") as hsnippet_file:
+            #read file
+            hsnippet_content = hsnippet_file.read()
+            print(hsnippet_content)    #Debug
+
+            #count nodes from the load
+            node_count = hsnippet_content.count('type: "node"')
+            
+            self.msleep(500)    #sleep for .5 seconds
+
+            for index in range(node_count):
+                progress_percentage = int((index + 1) / node_count * 100)    #convert to percentage
+                self.update_progress.emit(progress_percentage)
+
+        if progress_percentage == 100:
+            return True
+        else:
+            return False
 
 class DummyShowSeqShot:
-    SHOW_ROOT = "C:/LocalJobs/TestStudio"
+    ROOT = "None"     #"C:/LocalJobs/TestStudio"
+    SHOW_ROOT = "Shows"
     SEQ_ROOT = "Seq"
     SHOT_ROOT = "Shots"
     SNIPPET_SUBFOLDER = "Assets/Snippets"
-    def __init__(self) -> None:
-        self._shows = ["None"] + os.listdir(DummyShowSeqShot.SHOW_ROOT)
+    def __init__(self):
+        self._shows = ["None"]            #["None"] + os.listdir(DummyShowSeqShot.ROOT)
         self._cur_show = None
 
         self._seqs = None
@@ -22,7 +147,7 @@ class DummyShowSeqShot:
         self._shots = None
         self._cur_shot = None
 
-        self._cur_dir = DummyShowSeqShot.SHOW_ROOT
+        self._cur_dir = DummyShowSeqShot.ROOT
 
     def current_shot(self):
         return self._cur_shot
@@ -34,65 +159,119 @@ class DummyShowSeqShot:
         return self._cur_show
 
     def clear_all(self):
-        self.__init__()
+        self.__init__() #reinitialize and clear everything
 
     def select_show(self, show):
         self._cur_seq = None
         self._shots = None
         self._cur_shot = None
+
         if show != "None":
-            self._cur_dir = os.path.join(DummyShowSeqShot.SHOW_ROOT, show)
+            self._cur_dir = os.path.join(DummyShowSeqShot.ROOT, DummyShowSeqShot.SHOW_ROOT, show).replace("\\", "/")
             self._cur_show = show
-            self._seqs = ["None"] + os.listdir(os.path.join(self._cur_dir, DummyShowSeqShot.SEQ_ROOT))
+            self._seqs = os.listdir(os.path.join(self._cur_dir, DummyShowSeqShot.SEQ_ROOT).replace("\\", "/"))  #["None"] + 
+        
         else:
             self._cur_show = None
             self._seqs = None
-            self._shows = ["None"] + os.listdir(DummyShowSeqShot.SHOW_ROOT)
-            self._cur_dir = DummyShowSeqShot.SHOW_ROOT
+            self._shows = os.listdir(os.path.join(DummyShowSeqShot.ROOT, DummyShowSeqShot.SHOW_ROOT).replace("\\", "/"))
+            self._cur_dir = os.path.join(DummyShowSeqShot.ROOT, DummyShowSeqShot.SHOW_ROOT)
 
-    def select_seq(self, seq):
+    def select_seq(self, seq):  #seq is derived from the selection
         self._cur_shot = None
         if seq != "None":
-            self._cur_dir = os.path.join(DummyShowSeqShot.SHOW_ROOT, self._cur_show, DummyShowSeqShot.SEQ_ROOT, seq)
+            self._cur_dir = os.path.join(os.path.join(DummyShowSeqShot.ROOT, DummyShowSeqShot.SHOW_ROOT).replace("\\", "/"), self._cur_show, DummyShowSeqShot.SEQ_ROOT, seq)
             self._cur_seq = seq
-            self._shots = ["None"] + os.listdir(os.path.join(self._cur_dir, DummyShowSeqShot.SHOT_ROOT))
+            self._shots = os.listdir(os.path.join(self._cur_dir, DummyShowSeqShot.SHOT_ROOT).replace("\\", "/"))    #["None"] + 
         else:
-            self._cur_dir = os.path.join(DummyShowSeqShot.SHOW_ROOT, self._cur_show)
+            self._cur_dir = os.path.join(os.path.join(DummyShowSeqShot.ROOT, DummyShowSeqShot.SHOW_ROOT).replace("\\", "/"), self._cur_show)
             self._cur_seq = None
             self._shots = None
-        
 
     def select_shot(self, shot):
         if shot != "None":
-            self._cur_dir = os.path.join(DummyShowSeqShot.SHOW_ROOT, self._cur_show, DummyShowSeqShot.SEQ_ROOT, self._cur_seq, DummyShowSeqShot.SHOT_ROOT, shot)
+            self._cur_dir = os.path.join(os.path.join(DummyShowSeqShot.ROOT, DummyShowSeqShot.SHOW_ROOT).replace("\\", "/"), self._cur_show, DummyShowSeqShot.SEQ_ROOT, self._cur_seq, DummyShowSeqShot.SHOT_ROOT, shot)
             self._cur_shot = shot
         else:
-            self._cur_dir = os.path.join(DummyShowSeqShot.SHOW_ROOT, self._cur_show, DummyShowSeqShot.SEQ_ROOT, self._cur_seq)
+            self._cur_dir = os.path.join(os.path.join(DummyShowSeqShot.ROOT, DummyShowSeqShot.SHOW_ROOT).replace("\\", "/"), self._cur_show, DummyShowSeqShot.SEQ_ROOT, self._cur_seq)
 
     def get_snippet_folder(self):
         if self._cur_dir is not None:
-            return os.path.join(self._cur_dir, DummyShowSeqShot.SNIPPET_SUBFOLDER)
+            return os.path.join(self._cur_dir, DummyShowSeqShot.SNIPPET_SUBFOLDER).replace("\\", "/")
         else:
             return None
 
 class SnippetBrowser(QWidget):
+    button_clicked = Signal(int)
+    combo_box_index_changed = Signal(str)
+    
     def __init__(self, parent=None):
         QtWidgets.QWidget.__init__(self, parent)
-        self.setGeometry(500, 300, 500, 500)
+        self.setGeometry(500, 300, 700, 700)
         self.setWindowTitle('Snippet Browser')
+        self.setWindowFlag(QtCore.Qt.WindowStaysOnTopHint, True)
 
+        self.status_bar = QStatusBar()
         self.outer_vbox = QVBoxLayout()
         self.shot_select_form = QFormLayout()
         self.snippet_select_list = QListWidget()
         self.control_buttons_layout = QHBoxLayout()
+        
+        #establish progress bar
+        self.progress_bar = QProgressBar(self)
+        
+        ###############################################################################
 
+        self.file_browse_layout = QHBoxLayout()
+        self.file_browse_label = QLabel("Project Path: ")
+        self.file_browse_line_edit = QLineEdit(self)
+        self.file_browse_line_edit.setReadOnly(True)
+        self.file_browse_line_edit.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.file_browse_line_edit.setStyleSheet("QLineEdit { selection-background-color: palette(window); }")
+        self.file_browse_line_edit.setFrame(QtWidgets.QFrame.NoFrame)
+        self.file_browse_button = HoverButton("Browse", "Browse to Set Project Path", self)
+
+        #Add File Browser Widgets
+        self.file_browse_layout.addWidget(self.file_browse_label)
+        self.file_browse_layout.addWidget(self.file_browse_line_edit)
+        self.file_browse_layout.addWidget(self.file_browse_button)
+
+        #Overall Layout Vertical Box
+        self.outer_vbox.addLayout(self.file_browse_layout)
         self.outer_vbox.addLayout(self.shot_select_form)
         self.outer_vbox.addWidget(self.snippet_select_list)
         self.outer_vbox.addLayout(self.control_buttons_layout)
+        
+        #add progress bar
+        self.outer_vbox.addWidget(self.progress_bar)
+        
+        #add status bar
+        self.outer_vbox.addWidget(self.status_bar)
 
         self.show_select_combobox = QComboBox()
         self.seq_select_combobox = QComboBox()
         self.shot_select_combobox = QComboBox()
+
+        #create directory buttons
+        self.show_create_dir_button = HoverButton("Create Show Dir", "Create Directory in Show Folder", self)
+        self.seq_create_dir_button = HoverButton("Create Seq Dir", "Create Directory in Seq Directory", self)
+        self.shot_create_dir_button = HoverButton("Create Shot Dir", "Create Directory for Shot Directory", self)
+
+        self.show_combo_layout = QHBoxLayout()
+        self.seq_combo_layout = QHBoxLayout()
+        self.shot_combo_layout = QHBoxLayout()
+
+        #show combo box layout
+        self.show_combo_layout.addWidget(self.show_select_combobox)
+        self.show_combo_layout.addWidget(self.show_create_dir_button)
+
+        #sequence combo box layout
+        self.seq_combo_layout.addWidget(self.seq_select_combobox)
+        self.seq_combo_layout.addWidget(self.seq_create_dir_button)
+
+        #shot combo box layout
+        self.shot_combo_layout.addWidget(self.shot_select_combobox)
+        self.shot_combo_layout.addWidget(self.shot_create_dir_button)
 
         self.show_seq_shot_selector = DummyShowSeqShot()
         self.show_select_combobox.addItems(self.show_seq_shot_selector._shows)
@@ -101,14 +280,14 @@ class SnippetBrowser(QWidget):
         self.seq_select_combobox.activated.connect(self.seq_selected)
         self.shot_select_combobox.activated.connect(self.shot_selected)
         
-        self.shot_select_form.addRow("Show", self.show_select_combobox)
-        self.shot_select_form.addRow("Sequence", self.seq_select_combobox)
-        self.shot_select_form.addRow("Shot", self.shot_select_combobox)
+        self.shot_select_form.addRow("Show", self.show_combo_layout)     #show_select_combobox
+        self.shot_select_form.addRow("Sequence", self.seq_combo_layout)     #seq_select_combobox
+        self.shot_select_form.addRow("Shot", self.shot_combo_layout)     #shot_select_combobox
 
-        self.save_btn = QPushButton("Save")
-        self.load_btn = QPushButton("Load")
-        self.delete_btn = QPushButton("Delete")
-        self.refresh_btn = QPushButton("Refresh")
+        self.save_btn = HoverButton( "Save", "Saves Current Selection of Nodes into the Current Asset Directory", self)
+        self.load_btn = HoverButton("Load", "Loads Current Snippet into your current Houdini Directory", self)
+        self.delete_btn = HoverButton("Delete", "Deletes the Current Snippet from the Snippet Browser", self)
+        self.refresh_btn = HoverButton("Refresh", "Refreshes Current Directory of Snippets", self)
 
         self.control_buttons_layout.addWidget(self.save_btn)
         self.control_buttons_layout.addWidget(self.load_btn)
@@ -116,55 +295,355 @@ class SnippetBrowser(QWidget):
         self.control_buttons_layout.addWidget(self.refresh_btn)
         self.snippet_paths_list = None
 
+        #file browse connect
+        self.file_browse_button.clicked.connect(self.show_folder_dialog)
+        self.file_browse_button.show_status_tip.connect(self.update_status_tip) #connect signals to status tip
+        self.file_browse_button.clear_status_tip.connect(self.clear_status_tip) #connect signal to clear status tip
+
+        #save button
         self.save_btn.clicked.connect(self.publish_snippet)
+        self.save_btn.show_status_tip.connect(self.update_status_tip)
+        self.save_btn.clear_status_tip.connect(self.clear_status_tip)
+
+        #load button
         self.load_btn.clicked.connect(self.load_snippet)
+        self.load_btn.clicked.connect(self.button_clicked_emit)
+        self.button_clicked.connect(self.store_button_emit_value)
+        self.load_btn.show_status_tip.connect(self.update_status_tip)
+        self.load_btn.clear_status_tip.connect(self.clear_status_tip)
+        
+        #delete button
         self.delete_btn.clicked.connect(self.delete_snippet)
+        self.delete_btn.show_status_tip.connect(self.update_status_tip)
+        self.delete_btn.clear_status_tip.connect(self.clear_status_tip)
+
+        #refresh button
         self.refresh_btn.clicked.connect(self.update_snippets)
+        self.refresh_btn.show_status_tip.connect(self.update_status_tip)
+        self.refresh_btn.clear_status_tip.connect(self.clear_status_tip)
+
+        #show create dir button
+        self.show_create_dir_button.show_status_tip.connect(self.update_status_tip)
+        self.show_create_dir_button.clear_status_tip.connect(self.clear_status_tip)
+        self.show_create_dir_button.clicked.connect(self.show_create_directory)
+
+        #seq create dir button
+        self.seq_create_dir_button.show_status_tip.connect(self.update_status_tip)
+        self.seq_create_dir_button.clear_status_tip.connect(self.clear_status_tip)
+        self.seq_create_dir_button.clicked.connect(self.seq_create_directory)
+
+        #shot create dir button
+        self.shot_create_dir_button.show_status_tip.connect(self.update_status_tip)
+        self.shot_create_dir_button.clear_status_tip.connect(self.clear_status_tip)
+        self.shot_create_dir_button.clicked.connect(self.shot_create_directory)
+        
+        #lineEdit check dir connect
+        self.file_browse_line_edit.textChanged.connect(self.check_subdirectories)
+
+        #snippet select list
         self.snippet_select_list.currentTextChanged.connect(self.check_enabled)
+
+        #Create instance of the file dialog widget(initially will be set to None)
+        self.folder_dialog_widget = None
 
         self.setLayout(self.outer_vbox)
         self.update_snippets()
         self.check_enabled()
 
+        #set loading thread to None as an init
+        self.thread = None
+
+        self.captured_text = ""
+##########################################################################################################
+#   Handle Button Clicked Signal
+
+    def button_clicked_emit(self):
+        self.button_clicked.emit(1)
+        print("button click emitting")
+
+    def store_button_emit_value(self, value):
+        self.button_state = value
+        print(f"Button State: {self.button_state}")
+
+##########################################################################################################
+#   Button Update Signals
+
+    def update_status_tip(self, message):
+        self.status_bar.showMessage(message)
+
+    def clear_status_tip(self):
+        self.status_bar.clearMessage()
+
+##########################################################################################################
+#   Handle Naming Launch Dialog
+
+    def launch_dialog(self):
+        self.dialog = GiveNameDialog(self)
+        self.dialog.text_entered_signal.connect(self.handle_text)
+        result = self.dialog.exec_()    #Fire Dialog
+        self.dialog.accepted.connect(self.handle_text)
+        #self.dialog.deleteLater()
+
+        if result == self.dialog.Accepted:
+            return str(self.captured_text)
+
+        else:
+            self.update_show_combo_box_lists()
+            self.update_seq_combo_box_lists()
+            self.update_shots_combo_box_lists()
+            self.dialog.reject()
+
+    def handle_text(self, text): #text is the emitted signal from the GiveNameDialog
+        self.captured_text = text
+
+##########################################################################################################
+#    Handle Folder Set Project Directory
+
+    def show_folder_dialog(self):
+        print("Firing File Dialog") #Debug
+        if self.folder_dialog_widget is None:
+            self.folder_dialog_widget = FileDialogWindow(self)
+            self.folder_dialog_widget.folder_selected.connect(self.handle_folder_selected)  #folder_selected is the signal connected from the FileDialogWidget
+            #Cleanup
+            self.folder_dialog_widget.destroyed.connect(self.destroy_folder_dialog_widget)
+        self.folder_dialog_widget.show_folder_dialog()
+
+        #return folder_path value
+        return self.folder_dialog_widget.folder_path
+
+    def handle_folder_selected(self, folder_path): 
+        #set line edit to signal from FileDialogWidget
+        self.file_browse_line_edit.setText(folder_path)
+        #set the cursor position to the end
+        self.file_browse_line_edit.setCursorPosition(len(folder_path))
+        print("Project Folder set to: {}".format(folder_path))
+
+#####################################################################################################
+#   Properly Update the Project Path After it is Initiated
+    
+        DummyShowSeqShot.ROOT = folder_path
+        self.show_seq_shot_selector._shows = ["None"] + os.listdir(os.path.join(DummyShowSeqShot.ROOT, DummyShowSeqShot.SHOW_ROOT).replace("\\", "/"))
+        self.show_select_combobox.clear()
+        self.show_select_combobox.addItems(self.show_seq_shot_selector._shows)
+    
+    def destroy_folder_dialog_widget(self):
+        if self.folder_dialog_widget is not None:
+            #first disconnect the file dialog widget
+            self.folder_dialog_widget.folder_selected.disconnect(self.handle_folder_selected)
+            #destroy the file dialog widget after (clean up)
+            self.folder_dialog_widget.destroyed.connect(self.destroy_folder_dialog_widget)
+            #set instance back to None so browsing can be fired again
+            self.folder_dialog_widget = None
+
+##########################################################################################################
+#   Check SubDirs for Appropriate Project Setup
+
+    def check_subdirectories(self):
+        print("Checking Subdirectories is Active")  #Debug
+        proj_path = self.file_browse_line_edit.text()
+
+        #List out directories in folder_items
+        folder_items = os.listdir(proj_path)
+
+        #Concat folders into a list if folders exist in the directory. By Default it should be none
+        folders = [item for item in folder_items if os.path.join(proj_path, item)]
+        folder_paths = list()
+
+        folder_path = os.path.join(proj_path, DummyShowSeqShot.SHOW_ROOT).replace("\\", "/")
+
+        for folder in folders:
+            folder_paths.append(os.path.join(proj_path, folder).replace("\\", "/"))
+
+        #print(folders)  #Debug
+        #print(folder_paths)  #Debug
+    
+        if not os.path.exists(folder_path):
+            make_new_proj_reply = QMessageBox.warning(self, "Warning", "No Default Show Directory Found! One will be Created for You!",
+                                                      QMessageBox.Ok)
+            if make_new_proj_reply == QMessageBox.Ok:
+                os.mkdir(folder_path)
+                self.show_seq_shot_selector._shows = ["None"] + os.listdir(os.path.join(DummyShowSeqShot.ROOT, DummyShowSeqShot.SHOW_ROOT). replace("\\", "/"))
+                self.show_select_combobox.clear()
+                self.show_select_combobox.addItems(self.show_seq_shot_selector._shows)
+            
+
+###################################################################################################################################################
+#   Create Show Directory Methods
+
+    def show_create_directory(self):
+        
+        while True:
+            new_show_folder_name = str(self.launch_dialog())                     #hou.ui.readInput("New Sequence Name: ")
+            new_show_dir = os.path.join(DummyShowSeqShot.ROOT, DummyShowSeqShot.SHOW_ROOT).replace("\\", "/")
+            new_show_path = os.path.join(new_show_dir, new_show_folder_name).replace("\\", "/")
+            if len(new_show_folder_name) <= 0:
+
+                hou.ui.displayMessage("Please Enter A Valid Name")
+
+            elif os.path.exists(new_show_path):
+
+                self.check_if_folder_exists(new_show_path)
+                #self.show_seq_shot_selector.select_show(new_show_folder_name)
+                break
+
+            else:
+                os.mkdir(new_show_path)
+                #self.show_seq_shot_selector.select_show(new_show_folder_name)
+                break
+
+        self.update_show_combo_box_lists()
+        self.update_seq_combo_box_lists()
+        self.update_shots_combo_box_lists()
+        self.update_snippets()
+        self.check_enabled()
+        
+        print("New Show Directory is: {}".format(new_show_dir))    #Debug
+        print("New Show Folder is located in{}".format(new_show_path))    #Debug
+        
+###################################################################################################################################################
+#   Create Original Seq Directory if None Exists
+        
+    def seq_create_directory(self):
+        print(type(self.show_seq_shot_selector._cur_show))
+        show_current = self.show_select_combobox.currentText()
+        new_seq_dir = os.path.join(DummyShowSeqShot.ROOT, DummyShowSeqShot.SHOW_ROOT, str(show_current), DummyShowSeqShot.SEQ_ROOT).replace("\\", "/")
+        if not os.path.exists(new_seq_dir):
+            os.mkdir(new_seq_dir)
+
+        while True:
+            new_seq_folder_name = str(self.launch_dialog())
+            
+            new_seq_path = os.path.join(new_seq_dir, new_seq_folder_name).replace("\\", "/")
+
+            if len(new_seq_folder_name) <= 0:
+                hou.ui.displayMessage("Please Enter A Valid Name")
+
+            elif os.path.exists(new_seq_path):
+                self.check_if_folder_exists(new_seq_path)
+                #self.show_seq_shot_selector.select_seq(new_seq_folder_name)
+                break
+
+            else:
+                os.mkdir(new_seq_path)
+                #self.show_seq_shot_selector.select_seq(new_seq_folder_name)
+                break
+
+        self.update_seq_combo_box_lists()
+        self.update_shots_combo_box_lists()
+        self.update_snippets()
+        self.check_enabled()
+        
+        print("New Sequence Directory is: {}".format(new_seq_dir))    #Debug
+        print("New Sequence Folder is located in{}".format(new_seq_path))    #Debug
+        
+    def shot_create_directory(self):
+        print(self.show_seq_shot_selector._cur_seq)
+        seq_current = self.seq_select_combobox.currentText()
+        new_shot_dir = os.path.join(DummyShowSeqShot.ROOT, DummyShowSeqShot.SHOW_ROOT, str(self.show_seq_shot_selector._cur_show), DummyShowSeqShot.SEQ_ROOT, str(seq_current), DummyShowSeqShot.SHOT_ROOT).replace("\\", "/")
+        if not os.path.exists(new_shot_dir):
+            os.mkdir(new_shot_dir)
+
+        while True:
+            new_shot_folder_name = str(self.launch_dialog())
+            new_shot_path = os.path.join(new_shot_dir, new_shot_folder_name).replace("\\", "/")
+            if len(new_shot_folder_name) <= 0:
+                hou.ui.displayMessage("Please Enter A Valid Name")
+
+            elif os.path.exists(new_shot_path):
+                self.check_if_folder_exists(new_shot_path)
+                #self.show_seq_shot_selector.select_shot(new_shot_folder_name)
+                break
+            else:
+                os.mkdir(new_shot_path)
+                #self.show_seq_shot_selector.select_shot(new_shot_folder_name)
+                break
+
+        self.update_shots_combo_box_lists()
+        self.update_snippets()
+        self.check_enabled()
+
+        print("New Shot Directory is: {}".format(new_shot_dir))
+        print("New Shot Folder is Located in: {}".format(new_shot_path))
+
+    def check_if_folder_exists(self, path):
+        print("Checking if Folder Exists")  #Debug
+
+        if os.path.exists(path):
+            print("Show already exists")    #Debug
+            reply = QMessageBox.question(self, "Confirmation", "This Directory already exists. Do you want to create a New Directory with the Same Name and Delete Everything in it?", 
+                                         QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                shutil.rmtree(path)
+                os.mkdir(path)
+
+######################################################################################################################################################
+#   Update Combo Box List for Creating New Directories
+
+    def update_show_combo_box_lists(self):
+        self.show_seq_shot_selector._shows = os.listdir(os.path.join(DummyShowSeqShot.ROOT, DummyShowSeqShot.SHOW_ROOT).replace("\\", "/"))
+        self.show_select_combobox.clear()
+        self.show_select_combobox.addItems(self.show_seq_shot_selector._shows)
+
+    def update_seq_combo_box_lists(self):
+        self.show_seq_shot_selector._seqs = os.listdir(os.path.join(DummyShowSeqShot.ROOT, DummyShowSeqShot.SHOW_ROOT, str(self.show_seq_shot_selector._cur_show), DummyShowSeqShot.SEQ_ROOT).replace("\\", "/"))
+        self.seq_select_combobox.clear()
+        self.seq_select_combobox.addItems(self.show_seq_shot_selector._seqs)
+
+    def update_shots_combo_box_lists(self):
+        self.show_seq_shot_selector._shots = os.listdir(os.path.join(DummyShowSeqShot.ROOT, DummyShowSeqShot.SHOW_ROOT, str(self.show_seq_shot_selector._cur_show), DummyShowSeqShot.SEQ_ROOT, str(self.show_seq_shot_selector._cur_seq), DummyShowSeqShot.SHOT_ROOT).replace("\\", "/"))
+        self.shot_select_combobox.clear()
+        self.shot_select_combobox.addItems(self.show_seq_shot_selector._shots)
+
+#####################################################################################################################################################
+#   Handle Snippets
+
     def check_enabled(self):
         snippets_count = self.snippet_select_list.count()
         has_snippets = snippets_count > 0
+
         has_show_selected = self.show_seq_shot_selector.current_show() is not None
         has_seq_selected = self.show_seq_shot_selector.current_seq() is not None
         has_snippet_selected = self.snippet_select_list.currentItem() is not None
+        has_seq = self.show_seq_shot_selector._seqs is not None
 
         self.load_btn.setEnabled(has_snippets and has_snippet_selected)
         self.delete_btn.setEnabled(has_snippets and has_snippet_selected)
-        self.seq_select_combobox.setEnabled(has_show_selected)
+        self.seq_select_combobox.setEnabled(has_show_selected)  #this needs to find if a folder exists
         self.shot_select_combobox.setEnabled(has_show_selected and has_seq_selected)
 
     def show_selected(self, index):
         show = self.show_select_combobox.currentText()
+        
         self.show_seq_shot_selector.select_show(show)
+
+        print(show) #Debug
+        
         self.seq_select_combobox.clear()
         self.shot_select_combobox.clear()
-        if self.show_seq_shot_selector._seqs is not None:
-            self.seq_select_combobox.addItems(self.show_seq_shot_selector._seqs)
+        #if self.show_seq_shot_selector._seqs is not None:
+        self.seq_select_combobox.addItems(self.show_seq_shot_selector._seqs)
+        if (self.show_seq_shot_selector._shots) != None:
+            self.shot_select_combobox.addItems(self.show_seq_shot_selector._shots)
+    
         self.update_snippets()
         self.check_enabled()
-
+        
     def seq_selected(self, index):
         seq = self.seq_select_combobox.currentText()
         self.show_seq_shot_selector.select_seq(seq)
         self.shot_select_combobox.clear()
-        if self.show_seq_shot_selector._shots is not None:
+        if self.show_seq_shot_selector._shots != None:
             self.shot_select_combobox.addItems(self.show_seq_shot_selector._shots)
+        
         self.update_snippets()
         self.check_enabled()
 
     def shot_selected(self, index):
         shot = self.shot_select_combobox.currentText()
         self.show_seq_shot_selector.select_shot(shot)
+
         self.update_snippets()
         self.check_enabled()
-
-    #def update_snippets(self):
-        #print(self.show_seq_shot_selector.get_snippet_folder())
 
     def publish_snippet(self): 
         snippet_folder = self.show_seq_shot_selector.get_snippet_folder()
@@ -177,9 +656,12 @@ class SnippetBrowser(QWidget):
             return False
 
         parent = items[0].parent()
+        child = items[0].children() ########################
+        print("parent node is: {}".format(parent))   #Debug
+        print("child nodes are: {}".format(child))    #Dbug
 
         snippet_name = hou.ui.readInput('Snippet Name:')[1]
-        snippet_path = os.sep.join((snippet_folder, snippet_name)).replace('\\', '/')
+        snippet_path = os.sep.join((snippet_folder, snippet_name)).replace('\\', '/')   #this path will be used to load the snippet items in load snippets
 
         hip_snippet_file = '{}.hsnippet'.format(snippet_path)
         parent.saveItemsToFile(items, hip_snippet_file)
@@ -193,6 +675,7 @@ class SnippetBrowser(QWidget):
 
         self.update_snippets()
         self.check_enabled()
+        print("Snippet Published to: {}".format(snippet_path))
         return True
 
     def update_snippets(self):
@@ -203,14 +686,79 @@ class SnippetBrowser(QWidget):
             all_snhdr_files = [x for x in os.listdir(snippet_folder) if x.endswith('.snhdr')]
             for item in all_snhdr_files:
                 with open(os.sep.join((snippet_folder, item)), 'r') as fd:
-                    info = json.load(fd)
+                    info = json.load(fd) 
                     self.snippet_paths_list.append(os.sep.join((snippet_folder, info['name'])))
                     self.snippet_select_list.addItem(f'{info["name"]} - {info["context"]}')
 
+###########################################################################################################
+#   Load Snippets
+
     def load_snippet(self):
+        #ensures that the file is open and read
+        #print(self.load_btn.receivers(self.load_btn.clicked))   #debug
+
         snippet_parent = toolutils.networkEditor().pwd()
-        selected_item = self.snippet_select_list.currentRow()
-        snippet_parent.loadItemsFromFile('{}.hsnippet'.format(self.snippet_paths_list[selected_item]))
+
+        selected_item = self.snippet_select_list.currentRow()   #this returns the index of the currently selected row
+        snippet_path = self.snippet_paths_list[selected_item]
+        existing_nodes_set = set(snippet_parent.allSubChildren())
+
+        with open("{}.snhdr".format(snippet_path), "r") as fd:    
+            info = json.load(fd)
+            fd.close()
+
+            print(info)
+
+        #existing_nodes_list = snippet_parent.allSubChildren()
+        snippet_parent.loadItemsFromFile('{}.hsnippet'.format(snippet_path))
+        #loaded_nodes_list = hou.selectedNodes()
+        #new_nodes_list = [node for node in loaded_nodes_list if node not in existing_nodes_list]
+
+        loaded_nodes_w_existing_nodes_set = set(snippet_parent.allSubChildren()) #this returns all the subchildren after its loaded then we compare it
+
+        new_nodes_set = loaded_nodes_w_existing_nodes_set.difference(existing_nodes_set)
+        #return new_nodes_set_len
+        new_nodes_set_len = len(new_nodes_set)
+
+        print("Amount of Nodes Loaded: {}".format(new_nodes_set_len))  #debug
+        print("Existing Nodes {}".format(existing_nodes_set))  #debug
+        #print("Button State: {}".format(self.button_state))    #Debug
+
+#################################################################################################################################
+#   Load Progress Bar
+
+        if  self.button_clicked_emit(): #derived from button_clicked_emit signal
+            print("Debug: Progress Bar Starting")
+            #self.load_btn.isCheckable(False)
+
+            snippet_to_eval = snippet_path
+            
+            self.thread = SnippetLoaderThread(snippet_to_eval)
+            self.thread.update_progress.connect(self.update_progress_bar)
+            self.thread.finished.connect(self.update_progress_bar_finished)
+
+            self.progress_bar.setValue(0)
+            self.thread.start()
+
+            #have the signal emit 0 after its checked
+            #self.msleep(3000)   #Debugging
+            self.button_clicked.emit(0)
+            self.button_state = 0
+            print("Button State is Set to: {}".format(self.button_state))
+
+        if self.thread.run() == True:
+            hou.ui.displayMessage("Total Amount of Nodes Loaded: {}".format(new_nodes_set_len))   ######## show messagea of how many nodes are loaded
+
+#################################################################################################################################
+#   Handle Load Progress Bar on Button Press
+
+    def update_progress_bar(self, value):
+        self.progress_bar.setValue(value)
+
+    def update_progress_bar_finished(self):
+        self.thread = None
+
+#################################################################################################################################
 
     def delete_snippet(self):
         selected_item = self.snippet_select_list.currentRow()
@@ -223,3 +771,5 @@ class SnippetBrowser(QWidget):
 
 dialog = SnippetBrowser()
 dialog.show()
+
+sys.exit(dialog)
